@@ -1,17 +1,13 @@
-# bus_booking
+# Horizon Express - Bus Booking
 
-A new Flutter project.
+A Flutter app for booking seats on the Huye bus. It signs users in with Firebase Authentication, and each user's bookings are saved in Cloud Firestore under their own id, so two accounts never see each other's data, and every change appears live.
 
-## Getting Started
+## Screenshots
 
-This project is a starting point for a Flutter application.
+![Login](screenshots/login.png)
 
-A few resources to get you started if this is your first Flutter project:
+![My data in Firestore](screenshots/console.png)
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+![Live update](screenshots/live.png)
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+![Second account sees nothing of mine](screenshots/denied.png)

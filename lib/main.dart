@@ -1,4 +1,9 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+
+import 'login_screen.dart';
 
 // ---------- MODEL ----------
 
@@ -42,9 +47,20 @@ String changeInNotes(int change) {
   return parts.join(' · ');
 }
 
+// The signed-in user's own bookings: users/{uid}/bookings
+CollectionReference<Map<String, dynamic>> bookingsRef() {
+  final uid = FirebaseAuth.instance.currentUser!.uid;
+  return FirebaseFirestore.instance
+      .collection('users')
+      .doc(uid)
+      .collection('bookings');
+}
+
 // ---------- APP ----------
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   runApp(const BusApp());
 }
 
@@ -56,7 +72,28 @@ class BusApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.indigo),
-      home: const SeatMapScreen(),
+      home: const AuthGate(),
+    );
+  }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+              body: Center(child: CircularProgressIndicator()));
+        }
+        if (snapshot.data == null) {
+          return const LoginScreen();
+        }
+        return const SeatMapScreen();
+      },
     );
   }
 }
@@ -74,23 +111,6 @@ class _SeatMapScreenState extends State<SeatMapScreen> {
   static const route = 'Huye';
   static const price = 3000;
 
-  final seats = List.generate(12, (i) => Seat(i + 1));
-
-  @override
-  void initState() {
-    super.initState();
-    // sample bookings so the app is never empty
-    seats[0].passenger = Passenger('Keza');
-    seats[0].paid = price;
-    seats[3].passenger = Passenger('Eric');
-    seats[3].paid = price;
-    seats[6].passenger = Passenger('Aline');
-    seats[6].paid = price;
-  }
-
-  int get sold => seats.where((s) => s.isTaken).length;
-  int get money => sold * price;
-
   void showMessage(String text) {
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
@@ -98,17 +118,31 @@ class _SeatMapScreenState extends State<SeatMapScreen> {
     );
   }
 
-  void cancelBooking(Seat seat) {
+  // Build the 12 seats from the documents that Firestore sent
+  List<Seat> seatsFrom(QuerySnapshot<Map<String, dynamic>> snapshot) {
+    final seats = List.generate(12, (i) => Seat(i + 1));
+    for (final doc in snapshot.docs) {
+      final number = int.tryParse(doc.id);
+      if (number == null || number < 1 || number > 12) continue;
+      final data = doc.data();
+      seats[number - 1].passenger = Passenger(data['name'] as String);
+      seats[number - 1].paid = (data['paid'] as num).toInt();
+    }
+    return seats;
+  }
+
+  Future<void> cancelBooking(Seat seat) async {
     final name = seat.passenger!.name;
-    setState(() {
-      seat.passenger = null;
-      seat.paid = 0;
-    });
-    // Step 6: the waitlist promotion will go here, inside this function
+    await bookingsRef().doc('${seat.number}').delete();
     showMessage('Booking cancelled for $name (seat ${seat.number})');
   }
 
-  void onSeatTap(Seat seat) {
+  Future<void> renameBooking(Seat seat, String newName) async {
+    await bookingsRef().doc('${seat.number}').update({'name': newName});
+    showMessage('Seat ${seat.number} is now for $newName');
+  }
+
+  void onSeatTap(Seat seat, List<Seat> seats) {
     // taken seat: open its details
     if (seat.isTaken) {
       Navigator.push(
@@ -117,7 +151,11 @@ class _SeatMapScreenState extends State<SeatMapScreen> {
           builder: (context) => BookingDetailsScreen(seat: seat),
         ),
       ).then((result) {
-        if (result == true) cancelBooking(seat);
+        if (result == true) {
+          cancelBooking(seat);
+        } else if (result is String) {
+          renameBooking(seat, result);
+        }
       });
       return;
     }
@@ -137,12 +175,14 @@ class _SeatMapScreenState extends State<SeatMapScreen> {
           takenNames: takenNames,
         ),
       ),
-    ).then((result) {
+    ).then((result) async {
       if (result != null) {
         final booking = result as Booking;
-        setState(() {
-          seat.passenger = Passenger(booking.name);
-          seat.paid = price;
+        await bookingsRef().doc('${seat.number}').set({
+          'name': booking.name,
+          'paid': price,
+          'cash': booking.cash,
+          'createdAt': FieldValue.serverTimestamp(),
         });
         showMessage('Seat ${seat.number} booked for ${booking.name}');
       }
@@ -152,71 +192,99 @@ class _SeatMapScreenState extends State<SeatMapScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Horizon Express')),
-      body: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            margin: const EdgeInsets.all(16),
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.indigo,
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  '$route · $price RWF',
-                  style: TextStyle(color: Colors.white, fontSize: 22),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Seats sold: $sold / ${seats.length}   ·   Money made: $money RWF',
-                  style: const TextStyle(color: Colors.white),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 4,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-                childAspectRatio: 0.85,
-              ),
-              itemCount: seats.length,
-              itemBuilder: (context, index) {
-                final seat = seats[index];
-                return InkWell(
-                  onTap: () => onSeatTap(seat),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: seat.isTaken
-                          ? Colors.red.shade100
-                          : Colors.green.shade100,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(seat.isTaken ? Icons.person : Icons.event_seat),
-                        Text('Seat ${seat.number}'),
-                        if (seat.isTaken)
-                          Text(
-                            seat.passenger!.name,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
+      appBar: AppBar(
+        title: const Text('Horizon Express'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Log out',
+            onPressed: () => FirebaseAuth.instance.signOut(),
           ),
         ],
+      ),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: bookingsRef().snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final seats = seatsFrom(snapshot.data!);
+          final sold = seats.where((s) => s.isTaken).length;
+          final money = seats.fold<int>(0, (sum, s) => sum + s.paid);
+
+          return Column(
+            children: [
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.indigo,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '$route · $price RWF',
+                      style: TextStyle(color: Colors.white, fontSize: 22),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Seats sold: $sold / ${seats.length}   ·   Money made: $money RWF',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: GridView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  gridDelegate:
+                  const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 4,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    childAspectRatio: 0.85,
+                  ),
+                  itemCount: seats.length,
+                  itemBuilder: (context, index) {
+                    final seat = seats[index];
+                    return InkWell(
+                      onTap: () => onSeatTap(seat, seats),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: seat.isTaken
+                              ? Colors.red.shade100
+                              : Colors.green.shade100,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(seat.isTaken
+                                ? Icons.person
+                                : Icons.event_seat),
+                            Text('Seat ${seat.number}'),
+                            if (seat.isTaken)
+                              Text(
+                                seat.passenger!.name,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -361,6 +429,36 @@ class BookingDetailsScreen extends StatelessWidget {
     );
   }
 
+  Future<void> editName(BuildContext context) async {
+    final controller = TextEditingController(text: seat.passenger!.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Edit passenger name'),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(border: OutlineInputBorder()),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('No'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.pop(dialogContext, controller.text.trim()),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    if (newName != null && newName.isNotEmpty && context.mounted) {
+      Navigator.pop(context, newName); // go back, saying "new name"
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -377,6 +475,11 @@ class BookingDetailsScreen extends StatelessWidget {
             const SizedBox(height: 8),
             Text('Paid: ${seat.paid} RWF'),
             const SizedBox(height: 24),
+            OutlinedButton(
+              onPressed: () => editName(context),
+              child: const Text('Edit name'),
+            ),
+            const SizedBox(height: 8),
             FilledButton(
               onPressed: () => confirmCancel(context),
               child: const Text('Cancel booking'),
