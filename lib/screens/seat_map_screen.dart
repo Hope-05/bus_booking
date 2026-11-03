@@ -1,112 +1,74 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../models/bus_models.dart';
+import '../state/bus_state.dart';
 import 'book_seat_screen.dart';
 import 'booking_details_screen.dart';
 
-// The signed-in user's own bookings: users/{uid}/bookings
-// (temporary here: it moves into the repository in the next step)
-CollectionReference<Map<String, dynamic>> bookingsRef() {
-  final uid = FirebaseAuth.instance.currentUser!.uid;
-  return FirebaseFirestore.instance
-      .collection('users')
-      .doc(uid)
-      .collection('bookings');
-}
-
-class SeatMapScreen extends StatefulWidget {
+class SeatMapScreen extends StatelessWidget {
   const SeatMapScreen({super.key});
 
-  @override
-  State<SeatMapScreen> createState() => _SeatMapScreenState();
-}
-
-class _SeatMapScreenState extends State<SeatMapScreen> {
-  static const route = 'Huye';
-  static const price = 3000;
-
-  void showMessage(String text) {
+  void showMessage(BuildContext context, String text) {
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(text)),
     );
   }
 
-  // Build the 12 seats from the documents that Firestore sent
-  List<Seat> seatsFrom(QuerySnapshot<Map<String, dynamic>> snapshot) {
-    final seats = List.generate(12, (i) => Seat(i + 1));
-    for (final doc in snapshot.docs) {
-      final number = int.tryParse(doc.id);
-      if (number == null || number < 1 || number > 12) continue;
-      final data = doc.data();
-      seats[number - 1].passenger = Passenger(data['name'] as String);
-      seats[number - 1].paid = (data['paid'] as num).toInt();
-    }
-    return seats;
-  }
+  Future<void> _onSeatTap(BuildContext context, Seat seat) async {
+    final bus = context.read<BusState>(); // read BEFORE any await
 
-  Future<void> cancelBooking(Seat seat) async {
-    final name = seat.passenger!.name;
-    await bookingsRef().doc('${seat.number}').delete();
-    showMessage('Booking cancelled for $name (seat ${seat.number})');
-  }
-
-  Future<void> renameBooking(Seat seat, String newName) async {
-    await bookingsRef().doc('${seat.number}').update({'name': newName});
-    showMessage('Seat ${seat.number} is now for $newName');
-  }
-
-  void onSeatTap(Seat seat, List<Seat> seats) {
     // taken seat: open its details
     if (seat.isTaken) {
-      Navigator.push(
+      final name = seat.passenger!.name;
+      final result = await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => BookingDetailsScreen(seat: seat),
+          builder: (_) => BookingDetailsScreen(seat: seat),
         ),
-      ).then((result) {
-        if (result == true) {
-          cancelBooking(seat);
-        } else if (result is String) {
-          renameBooking(seat, result);
-        }
-      });
+      );
+      if (!context.mounted) return;
+      if (result == true) {
+        await bus.cancel(seat.number);
+        if (!context.mounted) return;
+        showMessage(context, 'Booking cancelled for $name (seat ${seat.number})');
+      } else if (result is String) {
+        await bus.rename(seat.number, result);
+        if (!context.mounted) return;
+        showMessage(context, 'Seat ${seat.number} is now for $result');
+      }
       return;
     }
 
-    // free seat: open the booking screen
-    final takenNames = seats
-        .where((s) => s.isTaken)
-        .map((s) => s.passenger!.name.toLowerCase())
-        .toList();
-
-    Navigator.push(
+    // free seat: open the booking screen, and hand it the SAME brain
+    final result = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => BookSeatScreen(
-          seatNumber: seat.number,
-          price: price,
-          takenNames: takenNames,
+        builder: (_) => ChangeNotifierProvider<BusState>.value(
+          value: bus,
+          child: BookSeatScreen(
+            seatNumber: seat.number,
+            price: BusState.price,
+            takenNames: bus.takenNames,
+          ),
         ),
       ),
-    ).then((result) async {
-      if (result != null) {
-        final booking = result as Booking;
-        await bookingsRef().doc('${seat.number}').set({
-          'name': booking.name,
-          'paid': price,
-          'cash': booking.cash,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-        showMessage('Seat ${seat.number} booked for ${booking.name}');
-      }
-    });
+    );
+    if (!context.mounted) return;
+    if (result != null) {
+      final booking = result as Booking;
+      await bus.book(seat.number, booking);
+      if (!context.mounted) return;
+      showMessage(context, 'Seat ${seat.number} booked for ${booking.name}');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final bus = context.watch<BusState>(); // rebuild at every change
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Horizon Express'),
@@ -118,90 +80,89 @@ class _SeatMapScreenState extends State<SeatMapScreen> {
           ),
         ],
       ),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: bookingsRef().snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      body: _body(context, bus),
+    );
+  }
 
-          final seats = seatsFrom(snapshot.data!);
-          final sold = seats.where((s) => s.isTaken).length;
-          final money = seats.fold<int>(0, (sum, s) => sum + s.paid);
+  Widget _body(BuildContext context, BusState bus) {
+    if (bus.error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(bus.error!, textAlign: TextAlign.center),
+        ),
+      );
+    }
+    if (bus.loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-          return Column(
+    final seats = bus.seats;
+
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          margin: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.indigo,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: double.infinity,
-                margin: const EdgeInsets.all(16),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.indigo,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '$route · $price RWF',
-                      style: TextStyle(color: Colors.white, fontSize: 22),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Seats sold: $sold / ${seats.length}   ·   Money made: $money RWF',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ],
-                ),
+              Text(
+                '${BusState.route} · ${BusState.price} RWF',
+                style: const TextStyle(color: Colors.white, fontSize: 22),
               ),
-              Expanded(
-                child: GridView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  gridDelegate:
-                  const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 4,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
-                    childAspectRatio: 0.85,
-                  ),
-                  itemCount: seats.length,
-                  itemBuilder: (context, index) {
-                    final seat = seats[index];
-                    return InkWell(
-                      onTap: () => onSeatTap(seat, seats),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: seat.isTaken
-                              ? Colors.red.shade100
-                              : Colors.green.shade100,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(seat.isTaken
-                                ? Icons.person
-                                : Icons.event_seat),
-                            Text('Seat ${seat.number}'),
-                            if (seat.isTaken)
-                              Text(
-                                seat.passenger!.name,
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
+              const SizedBox(height: 8),
+              Text(
+                'Seats sold: ${bus.sold} / ${seats.length}   ·   Money made: ${bus.money} RWF',
+                style: const TextStyle(color: Colors.white),
               ),
             ],
-          );
-        },
-      ),
+          ),
+        ),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 4,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+              childAspectRatio: 0.85,
+            ),
+            itemCount: seats.length,
+            itemBuilder: (context, index) {
+              final seat = seats[index];
+              return InkWell(
+                onTap: () => _onSeatTap(context, seat),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: seat.isTaken
+                        ? Colors.red.shade100
+                        : Colors.green.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(seat.isTaken ? Icons.person : Icons.event_seat),
+                      Text('Seat ${seat.number}'),
+                      if (seat.isTaken)
+                        Text(
+                          seat.passenger!.name,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

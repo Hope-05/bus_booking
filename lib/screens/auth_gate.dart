@@ -1,6 +1,9 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../repositories/booking_repository.dart';
+import '../state/bus_state.dart';
 import 'login_screen.dart';
 import 'seat_map_screen.dart';
 
@@ -16,10 +19,15 @@ class AuthGate extends StatelessWidget {
           return const Scaffold(
               body: Center(child: CircularProgressIndicator()));
         }
-        if (snapshot.data == null) {
+        final user = snapshot.data;
+        if (user == null) {
           return const LoginScreen();
         }
-        return const SeatMapScreen();
+        // Signed in: one brain for this user, given to the seat map.
+        return ChangeNotifierProvider<BusState>(
+          create: (_) => BusState(BookingRepository(user.uid)),
+          child: const SeatMapScreen(),
+        );
       },
     );
   }
