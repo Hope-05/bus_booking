@@ -16,6 +16,7 @@ class BusApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      title: 'Horizon Express',
       theme: ThemeData(colorSchemeSeed: Colors.indigo),
       home: const AuthGate(),
     );
