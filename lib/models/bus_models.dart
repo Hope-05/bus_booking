@@ -1,8 +1,9 @@
 class Passenger {
-  Passenger(this.name, {this.priority = false});
+  Passenger(this.name, {this.priority = false, this.photoUrl}); // NEW photoUrl
 
   final String name;
   final bool priority;
+  final String? photoUrl; // NEW: link to the passenger's photo, or null
 }
 
 class Seat {
@@ -16,8 +17,9 @@ class Seat {
 }
 
 class Booking {
-  Booking(this.name, this.cash);
+  Booking(this.name, this.cash, {this.photoUrl}); // NEW photoUrl
 
   final String name;
   final int cash;
+  final String? photoUrl; // NEW
 }
